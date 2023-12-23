@@ -1,0 +1,164 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Resources:
+  MyTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: MyTargetGroup
+      Port: 8080
+      Protocol: HTTP
+      VpcId: vpc-08ff50e2e5b665ff3
+      TargetType: instance
+      HealthCheckEnabled: true
+      HealthCheckIntervalSeconds: 10
+      HealthCheckPath: /Login.jsp
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 3
+      UnhealthyThresholdCount: 5
+      Matcher:
+        HttpCode: 200,302
+      TargetGroupAttributes:
+        - Key: stickiness.enabled
+          Value: true
+        - Key: stickiness.type
+          Value: lb_cookie
+        - Key: stickiness.lb_cookie.duration_seconds
+          Value: 180  # Thời gian stickiness cookie được lưu trữ
+        - Key: deregistration_delay.timeout_seconds
+          Value: 300  # Thời gian chờ trước khi hủy đăng ký target sau khi nó trở thành unhealthy
+        - Key: slow_start.duration_seconds
+          Value: 30  # Thời gian khởi động chậm (slow start) để tránh quá tải
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: 'vpc-08ff50e2e5b665ff3'
+      GroupDescription: Allow inbound traffic for ELB
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '8080'
+          ToPort: '8080'
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: 'tcp'
+          FromPort: '3306'
+          ToPort: '3306'
+          CidrIp: '0.0.0.0/0'  # Cho MySQL
+        - IpProtocol: 'tcp'
+          FromPort: '22'
+          ToPort: '22'
+          CidrIp: '0.0.0.0/0'  # Cho SSH
+        - IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          CidrIp: 0.0.0.0/0
+
+  MyDBInstance:
+    Type: 'AWS::RDS::DBInstance'
+    Properties:
+      AllocatedStorage: '5'
+      DBInstanceIdentifier: 'mydbinstance3'
+      Engine: 'mysql'
+      MasterUsername: 'admin'
+      MasterUserPassword: 'Thanhbinh_1411'
+      DBInstanceClass: 'db.t2.micro'
+      VPCSecurityGroups:
+        - !GetAtt SecurityGroup.GroupId
+
+  MyLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: LoadBalancer
+      Subnets:
+        - subnet-0de850b12e3c2009f
+        - subnet-0ed3e47e208326b26
+        - subnet-0b63a1fe547fe2e51
+      Scheme: internet-facing
+      SecurityGroups:
+        - !Ref SecurityGroup
+
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref MyTargetGroup
+      LoadBalancerArn: !Ref MyLoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: MyLaunchTemplate
+      VersionDescription: Initial version
+      LaunchTemplateData:
+        KeyName: vockey
+        ImageId: ami-0230bd60aa48260c6
+        InstanceType: 't2.micro'
+        SecurityGroupIds:
+          - !Ref SecurityGroup
+        Monitoring:
+          Enabled: true
+        UserData:
+          Fn::Base64: |
+            #!/bin/bash
+            sudo yum update -y
+            sudo rpm --import https://repo.mysql.com/RPM-GPG-KEY-mysql-2022
+            wget http://dev.mysql.com/get/mysql57-community-release-el7-8.noarch.rpm
+            sudo yum localinstall -y mysql57-community-release-el7-8.noarch.rpm
+            sudo yum install -y mysql-community-server
+
+            sudo systemctl start mysqld 
+            sudo systemctl enable mysqld 
+
+            sudo yum install -y git
+            wget https://raw.githubusercontent.com/thanhbinh1411/cloud/main/QLKH.sql
+            mysql -h $(MyDBInstance.Endpoint.Address) -u admin -pThanhbinh_1411 < QLKH.sql
+
+            sudo yum install -y java-11-amazon-corretto
+            sudo yum install -y git
+            sudo yum -y install nginx
+            cd /var/lib
+            sudo git clone https://github.com/KietUTE2812/apache.git
+            sudo sed -i 's/ContactBook/web_ck2/g' apache/conf/server.xml
+            sudo chmod +x ./apache/bin/startup.sh
+            sudo chmod +x ./apache/bin/shutdown.sh
+            sudo chmod +x ./apache/bin/catalina.sh
+            cd apache/webapps
+            sudo git clone https://github.com/KietUTE2812/web_ck2.git
+            sudo /var/lib/apache/bin/startup.sh
+
+  AutoScalingGroup:
+    UpdatePolicy:
+      AutoScalingReplacingUpdate:
+        WillReplace: "true"
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: MyAutoScalingGroup
+      MinSize: 2
+      MaxSize: 5
+      DesiredCapacity: 3
+      VPCZoneIdentifier:
+        - subnet-0de850b12e3c2009f
+        - subnet-0ed3e47e208326b26
+      LaunchTemplate:
+        LaunchTemplateName: MyLaunchTemplate
+        Version: '1'
+      TargetGroupARNs:
+        - !Ref MyTargetGroup
+
+
+Outputs:
+  WebsiteURL:
+    Description: URL c?a trang web
+    Value: !Sub "http://${MyLoadBalancer.DNSName}/"
+    Export:
+      Name: !Sub "${AWS::StackName}-WebsiteURL"
+  LoadBalancerArn:
+    Description: ARN of the created load balancer
+    Value: !Ref MyLoadBalancer
+    Export:
+      Name: LoadBalancerArn
+  RDSInstanceEndpoint:
+    Description: 'Endpoint of the newly created RDS instance'
+    Value: !GetAtt MyDBInstance.Endpoint.Address
